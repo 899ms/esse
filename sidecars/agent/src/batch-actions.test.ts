@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { retryAllFailedSelection } from './batch-actions';
+import { retrieveTimedOutSelection, retryAllFailedSelection } from './batch-actions';
 import type { BatchJob } from './types';
 
 describe('Batch actions', () => {
@@ -16,6 +16,16 @@ describe('Batch actions', () => {
       jobIds: ['failed-safe', 'failed-unknown', 'failed-terminal'],
       includesUnknownCharge: true,
     });
+  });
+
+  it('selects only failed tasks with a resumable provider task for image retrieval', () => {
+    const timedOut = job('timed-out', 'failed', true, 'unknown');
+    timedOut.providerTask = { id: 'task-1', status: 'in_progress', submittedAt: '2026-07-22T00:00:00.000Z', updatedAt: '2026-07-22T00:01:00.000Z' };
+    const providerFailure = job('provider-failure', 'failed', true, 'unknown');
+    providerFailure.providerTask = { id: 'task-2', status: 'failure', submittedAt: '2026-07-22T00:00:00.000Z', updatedAt: '2026-07-22T00:01:00.000Z' };
+    const downloadFailed = job('download-failed', 'failed', true, 'unknown');
+    downloadFailed.providerTask = { ...timedOut.providerTask, id: 'download-task', status: 'completed' };
+    expect(retrieveTimedOutSelection({ jobs: [timedOut, providerFailure, downloadFailed] })).toEqual(['timed-out', 'download-failed']);
   });
 });
 

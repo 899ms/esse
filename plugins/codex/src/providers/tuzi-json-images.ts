@@ -15,20 +15,16 @@ export class TuziJsonImagesAdapter implements ProviderAdapter {
       let response: Response;
       try {
         const submitSignal = combinedSignal(Math.min(this.options.timeoutMs ?? IMAGE_REQUEST_TIMEOUT_MS, SUBMIT_TIMEOUT_MS), signal);
-        response = request.images.length
-          ? await this.edit(request, fetchImpl, submitSignal)
-          : await fetchImpl(`${this.options.baseUrl}/async/v1/images/generations`, {
+        response = isVideoModel(request.model)
+          ? await fetchImpl(`${this.options.baseUrl}/v1/videos`, {
             method: "POST",
             headers: { authorization: `Bearer ${this.options.apiKey}`, "content-type": "application/json" },
-            body: JSON.stringify({
-              model: request.model,
-              prompt: request.prompt,
-              n: 1,
-              response_format: request.responseFormat,
-              ...(request.size ? { size: request.size } : {}),
-              ...(request.quality ? { quality: request.quality } : {})
-            }),
+            body: JSON.stringify({ model: request.model, prompt: request.prompt, n: 1, quality: request.quality, response_format: "url", ...(request.size ? { size: request.size } : {}), ...(request.images.length ? { image: request.images.length === 1 ? request.images[0] : request.images } : {}) }),
             signal: submitSignal
+          })
+          : request.images.length ? await this.edit(request, fetchImpl, submitSignal) : await fetchImpl(`${this.options.baseUrl}/async/v1/images/generations`, {
+            method: "POST", headers: { authorization: `Bearer ${this.options.apiKey}`, "content-type": "application/json" },
+            body: JSON.stringify({ model: request.model, prompt: request.prompt, n: 1, response_format: request.responseFormat, ...(request.size ? { size: request.size } : {}), ...(request.quality ? { quality: request.quality } : {}) }), signal: submitSignal
           });
       } catch {
         throw new ProviderRequestError("图片任务提交失败；是否已被上游接收及扣费状态未知。", {
@@ -45,6 +41,7 @@ export class TuziJsonImagesAdapter implements ProviderAdapter {
       const now = new Date().toISOString();
       task = {
         id,
+        protocol: isVideoModel(request.model) ? "tuzi-video" : "tuzi-images",
         status: taskStatus(record.status) || "queued",
         progress: taskProgress(record.progress),
         requestId: requestId(response, parsed),
@@ -58,23 +55,14 @@ export class TuziJsonImagesAdapter implements ProviderAdapter {
 
   private async edit(request: GenerateRequest, fetchImpl: FetchLike, signal: AbortSignal): Promise<Response> {
     const form = new FormData();
-    form.append("model", request.model);
-    form.append("prompt", request.prompt);
-    form.append("n", "1");
-    if (request.size) form.append("size", request.size);
-    if (request.quality) form.append("quality", request.quality);
-    form.append("response_format", request.responseFormat);
+    form.append("model", request.model); form.append("prompt", request.prompt); form.append("n", "1"); form.append("response_format", request.responseFormat);
+    if (request.size) form.append("size", request.size); if (request.quality) form.append("quality", request.quality);
     for (const [index, image] of request.images.entries()) {
       const match = /^data:([^;,]+);base64,(.+)$/s.exec(image);
       if (!match?.[1] || !match[2]) throw new Error("Invalid base64 image input.");
       form.append("image", new Blob([Buffer.from(match[2], "base64")], { type: match[1] }), `input-${index + 1}.${extensionForMime(match[1])}`);
     }
-    return fetchImpl(`${this.options.baseUrl}/async/v1/images/edits`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${this.options.apiKey}` },
-      body: form,
-      signal
-    });
+    return fetchImpl(`${this.options.baseUrl}/async/v1/images/edits`, { method: "POST", headers: { authorization: `Bearer ${this.options.apiKey}` }, body: form, signal });
   }
 
   private async poll(initialTask: ProviderTaskState, onTask: GenerateRequest["onProviderTask"], signal?: AbortSignal): Promise<GenerateResult> {
@@ -89,7 +77,10 @@ export class TuziJsonImagesAdapter implements ProviderAdapter {
       let response: Response;
       let parsed: unknown;
       try {
-        response = await fetchImpl(`${this.options.baseUrl}/get-async?id=${encodeURIComponent(task.id)}`, {
+        const queryUrl = task.protocol === "tuzi-video"
+          ? `${this.options.baseUrl}/v1/videos/${encodeURIComponent(task.id)}`
+          : `${this.options.baseUrl}/get-async?id=${encodeURIComponent(task.id)}`;
+        response = await fetchImpl(queryUrl, {
           headers: { authorization: `Bearer ${this.options.apiKey}` },
           signal: combinedSignal(Math.min(POLL_TIMEOUT_MS, Math.max(1, deadline - Date.now())), signal)
         });
@@ -125,7 +116,10 @@ export class TuziJsonImagesAdapter implements ProviderAdapter {
         ...(["completed", "failure", "expired"].includes(status) ? { completedAt: now } : {})
       };
       await onTask?.(task);
-      if (status === "completed") return { ...extractImageResult(asyncResult(record.result)), providerRequestId: task.requestId || task.id };
+      if (status === "completed") {
+        const result = task.protocol === "tuzi-video" ? { url: record.video_url } : asyncResult(record.result);
+        return { ...extractImageResult(result), providerRequestId: task.requestId || task.id };
+      }
       if (status === "failure") throw new ProviderRequestError(taskFailureMessage(record), {
         retryable: true, chargeState: "unknown", requestId: task.requestId, origin: "upstream"
       });
@@ -144,6 +138,10 @@ function taskTimeout(task: ProviderTaskState, timeoutMs: number): ProviderReques
   });
 }
 
+function isVideoModel(model: string): boolean {
+  return model === "gpt-image-2" || model.startsWith("gemini-3.1-flash-image-preview");
+}
+
 function isTransientTaskQueryStatus(status: number): boolean {
   return status === 408 || status === 425 || status === 429 || status >= 500;
 }
@@ -151,6 +149,8 @@ function isTransientTaskQueryStatus(status: number): boolean {
 function taskStatus(value: unknown): ProviderTaskStatus | undefined {
   if (typeof value !== "string") return undefined;
   const clean = value.trim().toLowerCase();
+  if (clean === "succeeded") return "completed";
+  if (clean === "failed") return "failure";
   return ["not_start", "submitted", "queued", "in_progress", "completed", "failure", "expired"].includes(clean)
     ? clean as ProviderTaskStatus
     : undefined;

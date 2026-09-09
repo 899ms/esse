@@ -130,6 +130,7 @@ export type ProviderTaskStatus = 'not_start' | 'submitted' | 'queued' | 'in_prog
 
 export interface ProviderTaskState {
   id: string;
+  protocol?: 'tuzi-images' | 'tuzi-video';
   status: ProviderTaskStatus;
   progress?: number;
   requestId?: string;
@@ -292,6 +293,7 @@ export interface EsseDesktopBridge {
   modifyBatch(input: ModifyBatchInput): Promise<DesktopState>;
   cancelQueued(batchId: string): Promise<DesktopState>;
   retryJobs(batchId: string, jobIds: string[], allowUnknownCharge?: boolean): Promise<DesktopState>;
+  retrieveTimedOut(batchId: string): Promise<DesktopState>;
   deleteImages(batchId: string, imageIds: string[]): Promise<DesktopState>;
   deleteBatch(batchId: string): Promise<DesktopState>;
   activateBatch(batchId: string): Promise<DesktopState>;
